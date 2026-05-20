@@ -8,6 +8,8 @@ import streamlit as st
 import plotly.graph_objects as go
 
 from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderRateLimited, GeocoderServiceError, GeocoderTimedOut
+
 from skyfield.api import load, Star, wgs84
 from skyfield.data import hipparcos
 
@@ -60,8 +62,6 @@ HIP_NAMES = {
     65378: "Mizar",
     67301: "Alkaid",
     11767: "Polaris",
-    68702: "Hadar",
-    62434: "Mimosa",
     68702: "Beta Centauri",
     37826: "Pollux",
     36850: "Castor",
@@ -110,7 +110,6 @@ CONSTELLATION_LINES = {
 # ==========================================================
 # MESSIER DSO CATALOG SAMPLE
 # RA in degrees, Dec in degrees, mag approximate
-# You can expand this table later.
 # ==========================================================
 
 MESSIER_OBJECTS = [
@@ -159,19 +158,38 @@ def load_hipparcos_catalog():
     return stars
 
 
-@st.cache_data
+@st.cache_data(ttl=86400)
 def geocode_city(city_name: str):
-    geolocator = Nominatim(user_agent="celestial_sky_renderer")
-    location = geolocator.geocode(city_name, timeout=10)
+    """
+    Geocode city safely.
 
-    if location is None:
+    Streamlit Cloud can trigger Nominatim rate limits.
+    So this function must never crash the app.
+    """
+    if not city_name or not city_name.strip():
         return None
 
-    return {
-        "lat": float(location.latitude),
-        "lon": float(location.longitude),
-        "display_name": location.address,
-    }
+    try:
+        geolocator = Nominatim(
+            user_agent="celestial_sky_renderer_rahul_v1"
+        )
+
+        location = geolocator.geocode(city_name.strip(), timeout=10)
+
+        if location is None:
+            return None
+
+        return {
+            "lat": float(location.latitude),
+            "lon": float(location.longitude),
+            "display_name": location.address,
+        }
+
+    except (GeocoderRateLimited, GeocoderServiceError, GeocoderTimedOut):
+        return None
+
+    except Exception:
+        return None
 
 
 # ==========================================================
@@ -526,14 +544,17 @@ def build_sky_plot(planets_df, stars_df, dso_df, constellation_lines, title):
 # ==========================================================
 
 st.title("🔭 Celestial Sky Renderer")
-st.caption("Interactive scientific sky map using Skyfield, Hipparcos, Messier DSOs, Moon phase, twilight, and observing scores.")
+st.caption(
+    "Interactive scientific sky map using Skyfield, Hipparcos, Messier DSOs, "
+    "Moon phase, twilight, and observing scores."
+)
 
 with st.sidebar:
     st.header("Observer")
 
     location_mode = st.radio(
         "Location method",
-        ["City name", "Manual coordinates"]
+        ["Manual coordinates", "City name"]
     )
 
     if location_mode == "City name":
@@ -541,18 +562,42 @@ with st.sidebar:
         geo = geocode_city(city)
 
         if geo is None:
-            st.error("City not found. Try manual coordinates.")
-            st.stop()
+            st.warning(
+                "City lookup is temporarily unavailable due to geocoding API limits. "
+                "Using manual coordinates instead."
+            )
 
-        latitude = geo["lat"]
-        longitude = geo["lon"]
+            latitude = st.number_input(
+                "Latitude",
+                value=19.0760,
+                format="%.6f"
+            )
 
-        st.success(f"{geo['display_name']}")
-        st.write(f"Lat: `{latitude:.4f}`, Lon: `{longitude:.4f}`")
+            longitude = st.number_input(
+                "Longitude",
+                value=72.8777,
+                format="%.6f"
+            )
+
+        else:
+            latitude = geo["lat"]
+            longitude = geo["lon"]
+
+            st.success(f"{geo['display_name']}")
+            st.write(f"Lat: `{latitude:.4f}`, Lon: `{longitude:.4f}`")
 
     else:
-        latitude = st.number_input("Latitude", value=19.0760, format="%.6f")
-        longitude = st.number_input("Longitude", value=72.8777, format="%.6f")
+        latitude = st.number_input(
+            "Latitude",
+            value=19.0760,
+            format="%.6f"
+        )
+
+        longitude = st.number_input(
+            "Longitude",
+            value=72.8777,
+            format="%.6f"
+        )
 
     st.header("Time")
 
@@ -652,8 +697,11 @@ with st.spinner("Computing sky positions..."):
     moon_fraction, moon_sun_sep = moon_phase_fraction(eph, observer, t)
 
     planets_df = compute_solar_system_objects(
-        eph, observer, t,
-        moon_alt.degrees, moon_az.degrees,
+        eph,
+        observer,
+        t,
+        moon_alt.degrees,
+        moon_az.degrees,
         sun_alt.degrees,
         bortle
     ) if show_planets else pd.DataFrame()
